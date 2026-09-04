@@ -1,0 +1,129 @@
+# Changelog: lockscreen/
+
+## Unreleased
+
+### Changed
+- **`sddm/setup` ships unlock-on-login by default instead of stripping the
+  keyring.** The old wiring unconditionally deleted `pam_gnome_keyring` from
+  `/etc/pam.d/sddm`, citing a "passwordless Default_keyring" that nothing in the
+  repo ever created, so browsers prompted for the keyring on every launch. A
+  fresh install now wires `pam_gnome_keyring` (auth + session) so the login
+  keyring unlocks with the login password at sign-in -- unless autologin is
+  configured, where there is no password to reuse and it ships never-ask (lines
+  stripped; the blank default keyring is seeded lazily by the Hub/CLI, never by
+  this root installer). Honors `RYOKU_DRYRUN`; `ryoku keyring` changes it later.
+
+### Fixed
+- **The login screen always shows a mouse pointer.** Pinning
+  `XCURSOR_THEME=Bibata-Modern-Ice` in `GreeterEnvironment` only helps clients
+  that honor it; SDDM's Wayland greeter ignores it and, like weston's own
+  pointer, falls back to the cursor theme literally named `default`. Ryoku
+  shipped no `/usr/share/icons/default`, so that fallback resolved to nothing and
+  the greeter drew no pointer at all at boot and after logout (the in-session
+  lock, drawn by the running session, was unaffected). `sddm/setup` now points
+  the `default` theme at the shipped Bibata set (only when the box has no default
+  of its own); `ryoku doctor`'s `reconcileGreeterCursor` converges existing boxes.
+- **The greeter and the in-session lock always have a cursor theme.**
+  `sddm/setup` and the doctor pin `XCURSOR_THEME=Bibata-Modern-Ice` and
+  `XCURSOR_SIZE=24` in SDDM's `GreeterEnvironment`, `sddm/ryoku-greeter` exports
+  the same for weston's own pointer, and `lock.sh` defaults them when the shell
+  daemon that spawns it carries none, so the pointer is drawn from the shipped
+  set instead of whatever the "default" theme chain resolves to (or nothing).
+- **The SDDM greeter no longer lingers after login, draining power.** SDDM ran
+  the greeter on X11 while the Hyprland session is Wayland; at login SDDM's
+  `sddm-helper` died mid-teardown without reaping `sddm-greeter-qt6`, so the
+  greeter was orphaned onto a leftover Xorg and kept rendering forever. A video
+  greeter skin (e.g. Store "forest") decoded a 1440p60 clip on a screen nobody
+  was looking at, and even the default clockwork clock woke the CPU ~60x/s,
+  blocking deep idle on a laptop. `sddm/setup` now writes
+  `/etc/sddm.conf.d/10-ryoku-wayland.conf` (`DisplayServer=wayland`,
+  `GreeterEnvironment=QT_QPA_PLATFORM=wayland`,
+  `CompositorCommand=weston --shell=kiosk`), so the Qt greeter connects to
+  Weston instead of selecting xcb with no X server. The session tears it down
+  cleanly at login. Validated headlessly:
+  weston hosts the greeter as a separate client, the exact separate-process
+  model SDDM uses. `ryoku doctor` backports it to existing boxes; `base.packages`
+  and `ryoku-desktop` ship weston. Honors `RYOKU_DRYRUN`.
+- **The clockwork/orbital greeter clock stops animating off screen.** Its 60fps
+  smooth-second-hand timer ran unconditionally; it now gates on `Window.active`,
+  so a backgrounded or orphaned greeter never wakes the CPU for a clock no one
+  can see. The in-session lock (which alone sets `sddm.fingerprintHint`) keeps
+  animating -- its surface exists only while shown.
+- **Suspend now waits for the lock to actually cover the screen.** qylock's
+  `lock_shell.qml` touches `$XDG_RUNTIME_DIR/qylock.locked` the moment the
+  compositor confirms every output is covered (`WlSessionLock.secure`) and
+  removes it on unlock, giving `ryoku-shell lock` a real "locked" signal to
+  block on. Before, hypridle's `before_sleep_cmd` returned while Quickshell was
+  still loading QML, so logind's sleep inhibitor was released with the desktop
+  still in the framebuffer: opening the lid showed your windows for a beat
+  before the lock painted.
+- **A missing lock theme can no longer lock you out.** `lock.sh` defaulted to
+  `nier-automata`, a theme the shipped bundle does not contain, and never
+  checked the resolved theme path: with `~/.config/qylock/theme` lost (or an
+  uninstalled skin still named there) the theme Loader errored and the session
+  locked into a plain black surface that absorbed every keypress with no
+  password field. The default is now the shipped `clockwork/orbital` (also in
+  `lock_shell.qml` and the QtMultimedia shims), and `lock.sh` verifies
+  `Main.qml` exists, falling back to the stock theme before launching.
+- `lock.sh` resolves the session type from `$XDG_SESSION_ID` (or the user's
+  first logind session) instead of `loginctl | grep $(whoami)`, which matched
+  whichever of several sessions happened to sort first (re-login, a second
+  seat) and could misread wayland as tty.
+- The desktop no longer strands itself on a black lock screen after sleep. The
+  ext-session-lock protocol wedges the whole session if the locker crashes while
+  locked, which a GPU glitch on resume can trigger: the machine wakes to a black
+  screen that eats every keypress and can't be dismissed (reported as "slept and
+  won't wake up" and "keybinds don't register on the lock screen"). Hyprland now
+  ships with `misc:allow_session_lock_restore` on from boot, so it accepts a
+  fresh locker instead of stranding the session and `ryoku-shell lock` can relock
+  and take the password. qylock only enabled it after a successful unlock, which
+  is too late for the crash that happens before one.
+
+### Added
+- **Every lock skin shows a smooth fingerprint scan, with no per-theme code.** A
+  shared `FingerprintScan` reader rides above whatever theme is loaded, in both
+  the Wayland and X11 lock surfaces, driven by the shim's fingerprint state: a
+  calm breath while armed, the ridges filling as a finger is read, and a ring
+  completing on unlock. Because it sits above the theme Loader it covers the
+  current clockwork/orbital skin and any future one automatically
+  (`quickshell-lockscreen/lock_shell.qml`,
+  `quickshell-lockscreen/FingerprintScan.qml`).
+- **Fingerprint touch-to-unlock at the lock screen, sudo, and the SDDM greeter.**
+  The qylock lock unlocks with the same `pam_fprintd_grosshack` mechanism as the
+  greeter, through a self-contained `ryoku-lock` PAM service loaded via
+  `PamContext.configDirectory` (no root edit of `/etc/pam.d`): grosshack paired
+  with `pam_unix`, ending in `pam_deny`, so a touch or a typed password unlocks
+  in one conversation and neither matching fails closed. A Fingerprint card in
+  Ryoku Settings (**Lockscreen**) enrolls, verifies, names, and removes fingers
+  (fprintd over its own bus, never root), and toggles fingerprint for `sudo` and
+  the sign-in screen by injecting one `auth sufficient pam_fprintd_grosshack.so`
+  line at the top of `/etc/pam.d/{sudo,sddm}` through `pkexec` (backed up first,
+  removal deletes only that line). Arming waits for `WlSessionLock.secure`,
+  clears orphaned `fprintd-verify` before each arm, and never lets a dead
+  conversation fake a live sensor. A `~/.config/qylock/fingerprint` toggle gates
+  the lock's sensor.
+- Vendored the qylock clockwork theme (orbital and tape variants) and the
+  Quickshell lockscreen under `qylock/`, trimmed to only what Ryoku ships.
+- Per-skin `preview.gif` for the Lockscreen section in Ryoku Settings: orbital
+  reuses qylock's own clockwork preview (its dark-mode segment, to match the
+  shipped `themeMode=dark`); tape is rendered from the skin itself. They deploy
+  inside the themes dir, and `ryoku-hub lock list` reports their paths.
+- `install-qylock`: offline installer for the SDDM greeter and the in-session
+  lock. Installs the default skin under the fixed `/usr/share/sddm/themes/ryoku`
+  name (the one the Hub overwrites when a skin is chosen) and writes
+  `/etc/sddm.conf.d/99-ryoku.conf` (Current=ryoku), installs the Quickshell
+  lockscreen to the user's home, links `themes_link`, and sets
+  `~/.config/qylock/theme`. Resolves the login user under sudo and pkexec.
+  Honors `RYOKU_DRYRUN=1` and `--dry-run`.
+- `sddm/setup`: install-time SDDM wiring (enable sddm.service, default to
+  graphical.target, strip pam_gnome_keyring from the SDDM PAM stack, ensure a
+  Hyprland wayland session exists). Honors `RYOKU_DRYRUN=1` and `--dry-run`.
+
+### Fixed
+- In-session lock: skins that gate login and power behind `!isQuickshell`
+  (notably `material-you` and `nothing`) left the password field, reboot, and
+  shutdown dead under the Quickshell lock, since the shim omitted `sddm.hostName`
+  and `isQuickshell` was always true. The shim now reports a real `sddm.hostName`
+  (so `isQuickshell` is false), implements `sddm.suspend()`, and exposes SDDM's
+  `keyboard` object, so every catalogue skin authenticates and powers off under
+  the lock as it does under the SDDM greeter.

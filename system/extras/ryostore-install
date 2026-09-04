@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+
+# Extras actuator: installs, removes, and reports state for bundles in the
+# ryostore catalogue. The Hub's Extras section drives it; a bundle is a
+# list of items, each a `package` (auto-routed to official repos or AUR), a
+# `script` (small installer from ryostore/installers), or a `plugin`
+# (shell plugin fetched to ~/.local/share/ryoku/plugins; place via Settings,
+# Plugins).
+#
+#   ryostore-install status [bundle <id>]   print item state as JSON, no change
+#   ryostore-install install bundle <id>    install every absent item
+#   ryostore-install install item <id> <n>  install one item
+#   ryostore-install remove bundle <id>     remove the bundle's package items
+#   ryostore-install remove item <id> <n>   remove one package item
+#
+# Ryostore owns the network and the cache; this reads the cached catalogue under
+# `ryostore internal cache` and asks Ryostore for an installer path or a guest
+# install/removal on demand, so fetching lives in one place. Package installs
+# need a TTY for the sudo prompt, so the store launches install/remove in a
+# floating terminal; status is a silent query the UI calls inline.
+# RYOSTORE_DRYRUN=1 prints the planned actions without touching the system.
+
+set -uo pipefail
+
+DRYRUN=${RYOSTORE_DRYRUN:-}
+
+# Script installers drop tools into ~/.local/bin (npm prefix, GOBIN, pipx).
+# The graphical session doesn't always carry that on PATH, so prepend it
+# before any detection runs or fresh script items will read as still missing.
+export PATH="$HOME/.local/bin:$PATH"
+
+die() {
+  echo "ryostore-install: $1" >&2
+  exit 1
+}
+
+cache_dir() {
+  ryostore internal cache 2>/dev/null
+}
+
+# Path to a bundle's definition, fetched on demand: browsing carries inline
+# components in the registry and never warms per-bundle definitions, so install
+# and remove pull the full item list only for the one bundle acted on.
+bundle_file() {
+  local id=$1 f
+  f=$(ryostore internal bundle "$id" 2>/dev/null) \
+    || die "could not fetch bundle '$id' definition (is ryostore installed and online?)"
+  [[ -n $f && -f $f ]] || die "bundle '$id' definition is not available"
+  printf '%s\n' "$f"
+}
+
+# Emit "type<TAB>name<TAB>detect<TAB>tier<TAB>interactive<TAB>summary" from the
+# registry's inline components, so status renders without a per-bundle fetch.
+bundle_components() {
+  local id=$1 cache reg
+  cache=$(cache_dir) || die "could not resolve the extras cache (is ryostore installed?)"
+  reg="$cache/bundles/registry.json"
+  [[ -f $reg ]] || die "bundle catalogue is not cached"
+  jq -r --arg id "$id" '.bundles[] | select(.id == $id) | .components[]? | [.type, .name, (.detect // .name), (.tier // "core"), ((.interactive // false)|tostring), (.summary // "")] | @tsv' "$reg"
+}
+
+registry_ids() {
+  local cache reg
+  cache=$(cache_dir) || return 1
+  reg="$cache/bundles/registry.json"
+  [[ -f $reg ]] || return 1
+  jq -r '.bundles[].id' "$reg"
+}
+
+report_dir() {
+  printf '%s/ryostore\n' "${XDG_RUNTIME_DIR:-/tmp}"
+}
+
+# --- detection (one implementation, used by status and the install path) ------
+
+# One-shot snapshot of installed package names: status classifies dozens of
+# components, and a `pacman -Qq` per component spawns pacman hundreds of times
+# (seconds of latency). load_pkgset reads the whole set once; pkg_installed then
+# checks membership. Empty until loaded, so the install/remove paths keep their
+# live per-package query (correct after a fresh install).
+declare -A PKGSET
+PKGSET_LOADED=0
+load_pkgset() {
+  local n
+  while IFS= read -r n; do [[ -n $n ]] && PKGSET[$n]=1; done < <(pacman -Qq 2>/dev/null)
+  PKGSET_LOADED=1
+}
+pkg_installed() {
+  if (( PKGSET_LOADED )); then [[ -n ${PKGSET[$1]:-} ]]; return; fi
+  pacman -Qq "$1" >/dev/null 2>&1
+}
+pkg_official() { pacman -Si "$1" >/dev/null 2>&1; }
+cmd_present() { command -v "$1" >/dev/null 2>&1; }
+
+# The installed package(s) satisfying an item name, one per line, empty when
+# nothing does. `pacman -Q` resolves provides (a `whisper.cpp` item finds an
+# installed `whisper.cpp-cuda`), but `pacman -R` only takes real installed
+# names, so removals must target the owner, never the item name, or the whole
+# transaction aborts on "target not found".
+pkg_owners() { pacman -Qq "$1" 2>/dev/null; }
+
+# Where an installed plugin's source lives (read by the runtime + Settings).
+# The catalogue ships the source; install copies it here.
+plugin_dir() { printf '%s/ryoku/plugins/%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}" "$1"; }
+plugin_installed() { [[ -f "$(plugin_dir "$1")/manifest.json" ]]; }
+nautilus_track() { printf '%s/ryoku/nautilus/%s\n' "${XDG_DATA_HOME:-$HOME/.local/share}" "$1"; }
+nautilus_installed() { [[ -f "$(nautilus_track "$1")/manifest.json" ]]; }
+
+# Current state of one item, ignoring any in-flight operation.
+item_state() {
+  local type=$1 name=$2 detect=$3
+  case "$type" in
+    package) pkg_installed "$name" && echo present || echo absent ;;
+    script) cmd_present "$detect" && echo present || echo absent ;;
+    plugin) plugin_installed "$name" && echo present || echo absent ;;
+    nautilus-pack) nautilus_installed "$name" && echo present || echo absent ;;
+    *) echo absent ;;
+  esac
+}
+
+# --- report file (the Hub watches one JSON per bundle while work runs) ---------
+
+declare -A STATE REASON
+
+flush_report() {
+  local id=$1 phase=$2 dir items="{}" n tmp
+  dir=$(report_dir)
+  mkdir -p "$dir"
+  for n in "${!STATE[@]}"; do
+    items=$(jq --arg k "$n" --arg s "${STATE[$n]}" --arg r "${REASON[$n]:-}" \
+      '.[$k] = ({status: $s} + (if $r == "" then {} else {reason: $r} end))' <<<"$items")
+  done
+  tmp=$(mktemp "$dir/.$id.XXXXXX")
+  jq -n --arg id "$id" --arg phase "$phase" --argjson items "$items" \
+    '{id: $id, phase: $phase, items: $items}' >"$tmp" && mv -f "$tmp" "$dir/$id.json"
+}
+
+set_state() {
+  STATE[$1]=$2
+  REASON[$1]=${3:-}
+}
+
+# --- parsing ------------------------------------------------------------------
+
+# Emit "type<TAB>name<TAB>detect<TAB>summary" for the bundle's items, optionally
+# only those whose name is in the comma-separated $2 list.
+bundle_items() {
+  local file=$1 only=${2:-}
+  if [[ -n $only ]]; then
+    jq -r --arg only "$only" \
+      '($only | split(",")) as $ns | .items[] | select(.name as $x | $ns | index($x)) | [.type, .name, (.detect // .name), (.tier // "core"), ((.interactive // false)|tostring), (.summary // "")] | @tsv' "$file"
+  else
+    jq -r '.items[] | [.type, .name, (.detect // .name), (.tier // "core"), ((.interactive // false)|tostring), (.summary // "")] | @tsv' "$file"
+  fi
+}
+
+# --- status -------------------------------------------------------------------
+
+status_bundle_json() {
+  local id=$1 type name detect summary tier interactive out="[]"
+  while IFS=$'\t' read -r type name detect tier interactive summary; do
+    [[ -n $name ]] || continue
+    out=$(jq --arg t "$type" --arg n "$name" --arg s "$(item_state "$type" "$name" "$detect")" \
+      --arg sum "$summary" '. + [{type: $t, name: $n, status: $s, summary: $sum}]' <<<"$out")
+  done < <(bundle_components "$id")
+  jq -n --arg id "$id" --argjson items "$out" '{id: $id, items: $items}'
+}
+
+cmd_status() {
+  load_pkgset
+  if [[ ${1:-} == bundle ]]; then
+    [[ -n ${2:-} ]] || die "status bundle needs an id"
+    status_bundle_json "$2"
+    return
+  fi
+  local id out="[]"
+  while read -r id; do
+    [[ -n $id ]] || continue
+    out=$(jq --argjson b "$(status_bundle_json "$id")" '. + [$b]' <<<"$out")
+  done < <(registry_ids)
+  jq -n --argjson bundles "$out" '{bundles: $bundles}'
+}
+
+# --- install ------------------------------------------------------------------
+
+run_pkg() {
+  # $1 = backend helper, rest = package names
+  local helper=$1
+  shift
+  if [[ -n $DRYRUN ]]; then
+    echo "DRYRUN: $helper $*"
+    return 0
+  fi
+  "$helper" "$@"
+}
+
+run_script() {
+  local name=$1 path
+  if [[ -n $DRYRUN ]]; then
+    echo "DRYRUN: run installer $name"
+    return 0
+  fi
+  path=$(ryostore internal installer "$name" 2>/dev/null) || return 1
+  [[ -f $path ]] || return 1
+  bash "$path"
+}
+
+# Drop the plugin's source tree into the data dir the runtime + Settings read.
+# Ryostore owns the network and staging; we just trigger it. Install places the
+# plugin; it never enables it (enable lives in Settings).
+run_plugin_install() {
+  local name=$1
+  if [[ -n $DRYRUN ]]; then
+    echo "DRYRUN: install plugin $name"
+    return 0
+  fi
+  ryostore internal install-guest plugins "$name" >/dev/null 2>&1
+}
+
+run_nautilus_install() {
+  local name=$1
+  if [[ -n $DRYRUN ]]; then echo "DRYRUN: install nautilus pack $name"; return 0; fi
+  ryostore internal install-guest nautilus "$name" >/dev/null 2>&1
+}
+
+# Remove the plugin's source tree through Ryostore, which is symlink-safe and
+# clears the plugin's plugins.json entry with it.
+run_plugin_remove() {
+  local name=$1
+  if [[ -n $DRYRUN ]]; then
+    echo "DRYRUN: remove plugin $name"
+    return 0
+  fi
+  ryostore internal remove-guest plugins "$name" >/dev/null 2>&1
+}
+
+# Run a bundle's declared prerequisites before any package is routed, so a
+# package that only lives in an extra repo (Steam in multilib) classifies
+# and installs correctly.
+ensure_requires() {
+  local file=$1 req
+  while read -r req; do
+    [[ -n $req ]] || continue
+    case "$req" in
+      multilib)
+        if [[ -n $DRYRUN ]]; then
+          echo "DRYRUN: ensure the multilib repo is enabled"
+        else
+          echo "==> Ensuring the multilib repo is enabled"
+          ryoku-pkg-multilib || die "could not enable the multilib repo; its lib32 packages would mis-route to AUR source builds"
+        fi
+        ;;
+      cachyos)
+        if [[ -n $DRYRUN ]]; then
+          echo "DRYRUN: ensure the CachyOS repository is enabled"
+        else
+          echo "==> Ensuring the CachyOS repository is enabled"
+          ryoku-pkg-cachyos || die "could not enable the CachyOS repository"
+        fi
+        ;;
+      gpu-lib32)
+        if [[ -n $DRYRUN ]]; then
+          echo "DRYRUN: ensure the 32-bit (lib32) GPU driver stack for the detected hardware"
+        else
+          echo "==> Ensuring the 32-bit GPU driver stack for the detected hardware"
+          if command -v ryoku-gpu-lib32 >/dev/null 2>&1; then
+            ryoku-gpu-lib32 || true
+          else
+            echo "   ryoku-gpu-lib32 not found; run 'ryoku update' to get 32-bit GPU driver support"
+          fi
+        fi
+        ;;
+      *) die "this bundle needs a newer Ryoku (unknown requirement '$req'); run 'ryoku update' first" ;;
+    esac
+  done < <(jq -r '.requires[]? // empty' "$file")
+}
+
+install_set() {
+  local id=$1 only=${2:-} file type name detect summary tier interactive
+  file=$(bundle_file "$id")
+  ensure_requires "$file"
+
+  local -a repo=() aur=() scripts=() plugins=() nautilus_packs=()
+  declare -A SCRIPT_DETECT=() SCRIPT_INT=()
+
+  while IFS=$'\t' read -r type name detect tier interactive summary; do
+    [[ -n $name ]] || continue
+    # optional items only install one at a time (item scope), never in "install all".
+    if [[ -z $only && $tier == optional ]]; then continue; fi
+    case "$type" in
+      package)
+        if pkg_installed "$name"; then
+          set_state "$name" present
+        elif pkg_official "$name"; then
+          repo+=("$name")
+        else
+          aur+=("$name")
+        fi
+        ;;
+      script)
+        if cmd_present "$detect"; then
+          set_state "$name" present
+        else
+          scripts+=("$name")
+          SCRIPT_DETECT[$name]=$detect
+          SCRIPT_INT[$name]=$interactive
+        fi
+        ;;
+      plugin)
+        if plugin_installed "$name"; then
+          set_state "$name" present
+        else
+          plugins+=("$name")
+        fi
+        ;;
+      nautilus-pack)
+        if nautilus_installed "$name"; then
+          set_state "$name" present
+        else
+          nautilus_packs+=("$name")
+        fi
+        ;;
+      *)
+        set_state "$name" failed "unknown item type '$type'"
+        ;;
+    esac
+  done < <(bundle_items "$file" "$only")
+
+  local n
+  for n in "${repo[@]}" "${aur[@]}" "${scripts[@]}" "${plugins[@]}" "${nautilus_packs[@]}"; do set_state "$n" installing; done
+  flush_report "$id" running
+
+  if ((${#repo[@]})); then
+    echo "==> Installing from the official repos: ${repo[*]}"
+    run_pkg ryoku-pkg-add "${repo[@]}" || true
+    for n in "${repo[@]}"; do
+      if [[ -n $DRYRUN ]] || pkg_installed "$n"; then
+        set_state "$n" installed
+      else
+        set_state "$n" failed "pacman did not install it"
+      fi
+    done
+    flush_report "$id" running
+  fi
+
+  if ((${#aur[@]})); then
+    echo "==> Installing from the AUR: ${aur[*]}"
+    run_pkg ryoku-pkg-aur-add "${aur[@]}" || true
+    for n in "${aur[@]}"; do
+      if [[ -n $DRYRUN ]] || pkg_installed "$n"; then
+        set_state "$n" installed
+      else
+        set_state "$n" failed "the AUR build did not complete"
+      fi
+    done
+    flush_report "$id" running
+  fi
+
+  for n in "${scripts[@]}"; do
+    echo "==> Running installer: $n"
+    if run_script "$n"; then
+      if [[ -n $DRYRUN ]] || cmd_present "${SCRIPT_DETECT[$n]}"; then
+        set_state "$n" installed
+      elif [[ ${SCRIPT_INT[$n]:-false} == true ]]; then
+        set_state "$n" deferred "needs a manual download; re-run this item when ready"
+      else
+        set_state "$n" failed "the installer ran but '${SCRIPT_DETECT[$n]}' is still missing"
+      fi
+    else
+      if [[ ${SCRIPT_INT[$n]:-false} == true ]]; then
+        set_state "$n" deferred "needs a manual download; re-run this item when ready"
+      else
+        set_state "$n" failed "the installer exited with an error"
+      fi
+    fi
+    flush_report "$id" running
+  done
+
+  for n in "${plugins[@]}"; do
+    echo "==> Installing plugin: $n"
+    if run_plugin_install "$n" && { [[ -n $DRYRUN ]] || plugin_installed "$n"; }; then
+      set_state "$n" installed
+    else
+      set_state "$n" failed "could not fetch the plugin from the catalogue"
+    fi
+    flush_report "$id" running
+  done
+
+  for n in "${nautilus_packs[@]}"; do
+    echo "==> Installing file-manager scripts: $n"
+    if run_nautilus_install "$n" && { [[ -n $DRYRUN ]] || nautilus_installed "$n"; }; then
+      set_state "$n" installed
+    else
+      set_state "$n" failed "could not fetch the scripts from the catalogue"
+    fi
+    flush_report "$id" running
+  done
+
+  flush_report "$id" "done"
+}
+
+# --- remove -------------------------------------------------------------------
+
+remove_set() {
+  local id=$1 only=${2:-} file type name detect summary tier interactive
+  file=$(bundle_file "$id")
+
+  local -a pkgs=() pkg_items=()
+  local owner n
+  while IFS=$'\t' read -r type name detect tier interactive summary; do
+    [[ -n $name ]] || continue
+    case "$type" in
+      package)
+        # target the owning package(s): the item name may only be a provision.
+        local -a owners=()
+        mapfile -t owners < <(pkg_owners "$name")
+        if ((${#owners[@]})); then
+          pkg_items+=("$name")
+          set_state "$name" removing
+          for owner in "${owners[@]}"; do
+            [[ " ${pkgs[*]-} " == *" $owner "* ]] || pkgs+=("$owner")
+          done
+        else
+          set_state "$name" absent
+        fi
+        ;;
+      script)
+        set_state "$name" skipped "scripts are not auto-removed"
+        ;;
+      plugin)
+        if plugin_installed "$name"; then
+          run_plugin_remove "$name"
+          if [[ -n $DRYRUN ]] || ! plugin_installed "$name"; then
+            set_state "$name" removed
+          else
+            set_state "$name" failed "could not remove the plugin files"
+          fi
+        else
+          set_state "$name" absent
+        fi
+        ;;
+      nautilus-pack)
+        if nautilus_installed "$name"; then
+          if [[ -n $DRYRUN ]]; then
+            echo "DRYRUN: remove nautilus pack $name"; set_state "$name" removed
+          elif ryostore internal remove-guest nautilus "$name" >/dev/null 2>&1 && ! nautilus_installed "$name"; then
+            set_state "$name" removed
+          else
+            set_state "$name" failed "could not remove the scripts"
+          fi
+        else
+          set_state "$name" absent
+        fi
+        ;;
+    esac
+  done < <(bundle_items "$file" "$only")
+
+  flush_report "$id" running
+
+  if ((${#pkgs[@]})); then
+    echo "==> Removing: ${pkgs[*]}"
+    if ! run_pkg ryoku-pkg-remove "${pkgs[@]}"; then
+      # pacman aborts the whole batch when one target can't go (something else
+      # still requires it). Retry the stragglers one by one, twice, so a lone
+      # blocker costs itself, not the whole bundle; the second pass picks up a
+      # target that was only blocked by one removed in the first.
+      for _ in 1 2; do
+        for n in "${pkgs[@]}"; do
+          if pkg_installed "$n"; then
+            run_pkg ryoku-pkg-remove "$n" || true
+          fi
+        done
+      done
+    fi
+    for n in "${pkg_items[@]}"; do
+      if [[ -n $DRYRUN ]] || ! pkg_installed "$n"; then
+        set_state "$n" removed
+      else
+        set_state "$n" failed "pacman kept it (still required by another package?)"
+      fi
+    done
+  fi
+
+  flush_report "$id" "done"
+}
+
+summary_pause() {
+  local failed=0 n
+  for n in "${!STATE[@]}"; do
+    [[ ${STATE[$n]} == failed ]] && failed=1
+  done
+  if ((failed)) && [[ -t 0 && -z $DRYRUN ]]; then
+    echo ""
+    read -rp "Some items failed. Press Enter to close this window. " -t 60 _ || true
+  fi
+}
+
+# --- dispatch -----------------------------------------------------------------
+
+case "${1:-}" in
+  status)
+    cmd_status "${2:-}" "${3:-}"
+    ;;
+  install)
+    case "${2:-}" in
+      bundle)
+        [[ -n ${3:-} ]] || die "install bundle needs an id"
+        only=""
+        [[ ${4:-} == --only ]] && only=${5:-}
+        install_set "$3" "$only" ;;
+      item) [[ -n ${4:-} ]] || die "install item needs <id> <name>"; install_set "$3" "$4" ;;
+      *) die "install needs 'bundle <id>' or 'item <id> <name>'" ;;
+    esac
+    summary_pause
+    ;;
+  remove)
+    case "${2:-}" in
+      bundle) [[ -n ${3:-} ]] || die "remove bundle needs an id"; remove_set "$3" ;;
+      item) [[ -n ${4:-} ]] || die "remove item needs <id> <name>"; remove_set "$3" "$4" ;;
+      *) die "remove needs 'bundle <id>' or 'item <id> <name>'" ;;
+    esac
+    summary_pause
+    ;;
+  *)
+    cat >&2 <<'USAGE'
+usage:
+  ryostore-install status [bundle <id>]
+  ryostore-install install bundle <id> [--only name1,name2,...]
+  ryostore-install install item <id> <name>
+  ryostore-install remove bundle <id>
+  ryostore-install remove item <id> <name>
+USAGE
+    exit 2
+    ;;
+esac

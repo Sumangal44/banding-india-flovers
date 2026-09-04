@@ -1,0 +1,219 @@
+#!/usr/bin/env bash
+#
+# sddm/setup: wire SDDM as the graphical login manager at install time.
+#
+# runs on the target (typically from the install backend, in the chroot or
+# via sudo). the plumbing that makes a fresh box boot into the SDDM greeter
+# instead of a bare tty:
+#
+#   1. enable sddm.service
+#   2. default systemd target = graphical
+#   3. wire /etc/pam.d/sddm for the shipped keyring mode: unlock-on-login by
+#      default (pam_gnome_keyring unlocks the login keyring with the login
+#      password at sign-in, so the desktop stops prompting), or never-ask under
+#      autologin (strip the lines; there is no login password for PAM to reuse,
+#      and the keyring seeds a blank default on first use via the Hub/CLI).
+#   4. make sure a hyprland.desktop wayland session exists so SDDM can launch it
+#
+# the greeter THEME itself is installed by install-qylock. this script only
+# does the SDDM service/session wiring; keep the two separate so a cosmetic
+# theme failure never stops the login manager from coming up.
+#
+# usage:
+#   setup                run the wiring
+#   setup --dry-run      print the plan, change nothing
+#   RYOKU_DRYRUN=1 setup  same, via the shared installer switch
+
+set -euo pipefail
+
+RYOKU_DRYRUN="${RYOKU_DRYRUN:-0}"
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) RYOKU_DRYRUN=1 ;;
+    -h | --help)
+      sed -n '2,21p' "$0"
+      exit 0
+      ;;
+    *)
+      echo "setup: unknown argument: $arg" >&2
+      exit 1
+      ;;
+  esac
+done
+
+run() {
+  if [[ $RYOKU_DRYRUN == 1 ]]; then
+    printf 'DRYRUN: %s\n' "$*"
+    return 0
+  fi
+  "$@"
+}
+
+# root for system paths; sudo when we're not already root.
+if (( EUID == 0 )); then
+  PRIV=()
+else
+  PRIV=(sudo -n)
+fi
+priv() { run "${PRIV[@]}" "$@"; }
+
+# write a root-owned system file, content on stdin (mirrors install-qylock).
+write_root() {
+  local path="$1" content
+  content="$(cat)"
+  if [[ $RYOKU_DRYRUN == 1 ]]; then
+    printf 'DRYRUN: write (root) %s:\n%s\n' "$path" "$content"
+    return 0
+  fi
+  printf '%s\n' "$content" | "${PRIV[@]}" tee "$path" >/dev/null
+}
+
+PAM_FILE="/etc/pam.d/sddm"
+SESSION_DIR="/usr/share/wayland-sessions"
+HYPRLAND_SESSION="$SESSION_DIR/hyprland.desktop"
+
+# --- 1. enable the service ---------------------------------------------------
+echo "  enabling sddm.service"
+priv systemctl enable sddm.service
+
+# --- 2. default to the graphical target --------------------------------------
+# a plain Arch chroot leaves default.target = multi-user.target = boots to a
+# getty, SDDM never starts. the pacman post-install hook that normally flips
+# this doesn't fire in a chroot, so set it explicitly.
+echo "  setting default target -> graphical.target"
+priv systemctl set-default graphical.target
+
+# --- 3. wire pam_gnome_keyring for the shipped keyring mode ------------------
+# Fresh installs ship unlock-on-login: the desktop never prompts and the store
+# stays encrypted at rest. Under autologin there is no login password for PAM to
+# reuse, so we ship never-ask (strip the lines) instead; the blank default
+# keyring is seeded lazily by the Hub/CLI, never by this root installer -- a
+# root process must not create files in the user's home. `ryoku keyring set`
+# lets the user change this later.
+sddm_autologin() {
+  local f
+  for f in /etc/sddm.conf /etc/sddm.conf.d/*; do
+    [[ -f $f ]] || continue
+    awk '
+      /^\[/ { sec = $0 }
+      sec == "[Autologin]" && /^[[:space:]]*User[[:space:]]*=/ {
+        split($0, kv, "="); gsub(/[[:space:]]/, "", kv[2]); if (kv[2] != "") found = 1
+      }
+      END { exit(found ? 0 : 1) }
+    ' "$f" && return 0
+  done
+  return 1
+}
+
+wire_keyring_pam() {
+  if ! grep -qE '^[[:space:]]*auth.*pam_gnome_keyring\.so' "$PAM_FILE"; then
+    priv sed -i '/^[[:space:]]*auth[[:space:]].*include[[:space:]].*system-login/a auth optional pam_gnome_keyring.so' "$PAM_FILE"
+  fi
+  if ! grep -qE '^[[:space:]]*session.*pam_gnome_keyring\.so' "$PAM_FILE"; then
+    priv sed -i '/^[[:space:]]*session[[:space:]].*include[[:space:]].*system-login/a session optional pam_gnome_keyring.so auto_start' "$PAM_FILE"
+  fi
+}
+
+if [[ -f $PAM_FILE ]]; then
+  if sddm_autologin; then
+    echo "  autologin configured: shipping never-ask (stripping pam_gnome_keyring)"
+    if grep -q 'pam_gnome_keyring\.so' "$PAM_FILE"; then
+      priv sed -i '/pam_gnome_keyring\.so/d' "$PAM_FILE"
+    fi
+  else
+    echo "  shipping unlock-on-login (wiring pam_gnome_keyring into $PAM_FILE)"
+    wire_keyring_pam
+  fi
+else
+  echo "  note: $PAM_FILE not present yet; nothing to wire"
+fi
+
+# --- 4. make sure a Hyprland wayland session exists --------------------------
+session_found=false
+for session in hyprland.desktop Hyprland.desktop hyprland-uwsm.desktop; do
+  if [[ -f $SESSION_DIR/$session ]]; then
+    session_found=true
+    echo "  hyprland session present: $session"
+    break
+  fi
+done
+
+if [[ $session_found == false ]]; then
+  echo "  writing fallback session -> $HYPRLAND_SESSION"
+  priv mkdir -p "$SESSION_DIR"
+  if [[ $RYOKU_DRYRUN == 1 ]]; then
+    printf 'DRYRUN: write (root) %s:\n%s\n' "$HYPRLAND_SESSION" \
+      "[Desktop Entry]
+Name=Hyprland
+Comment=An intelligent dynamic tiling Wayland compositor
+Exec=Hyprland
+Type=Application"
+  else
+    "${PRIV[@]}" tee "$HYPRLAND_SESSION" >/dev/null <<'EOF'
+[Desktop Entry]
+Name=Hyprland
+Comment=An intelligent dynamic tiling Wayland compositor
+Exec=Hyprland
+Type=Application
+EOF
+  fi
+fi
+
+# --- 5. run the greeter on Wayland, not X11 ----------------------------------
+# SDDM's default X11 greeter is orphaned when a Wayland session (Hyprland)
+# starts: sddm-helper dies mid-teardown without reaping sddm-greeter-qt6, which
+# lingers on a leftover Xorg and keeps drawing power (a video skin decodes a
+# 1440p60 clip forever). Running the greeter on Wayland like the session lets
+# SDDM own the VT and tear it down cleanly at login. weston --shell=kiosk is
+# SDDM's default kiosk compositor (base.packages ships weston); the greeter
+# connects to it as a separate Wayland client.
+# The greeter has no session env, so XCURSOR_* is pinned to the shipped Bibata
+# set (ryoku-cursors): without a theme Qt falls back to "default", and where that
+# resolves to nothing the login screen has no visible pointer. Keep this body
+# identical to sddmWaylandBody() in ryoku/cli/internal/doctor/doctor.go, which
+# converges existing boxes onto it.
+WAYLAND_CONF="/etc/sddm.conf.d/10-ryoku-wayland.conf"
+GREETER_BIN="/usr/share/ryoku/lockscreen/ryoku-greeter"
+# the wrapper runs weston at each output's top mode; plain weston (preferred) if
+# the package has not landed it yet.
+if [[ -x $GREETER_BIN ]]; then
+  COMPOSITOR="$GREETER_BIN"
+else
+  COMPOSITOR="weston --shell=kiosk"
+fi
+echo "  greeter display server -> wayland ($WAYLAND_CONF)"
+priv mkdir -p /etc/sddm.conf.d
+write_root "$WAYLAND_CONF" <<EOF
+[General]
+DisplayServer=wayland
+GreeterEnvironment=QT_QPA_PLATFORM=wayland,XCURSOR_THEME=Bibata-Modern-Ice,XCURSOR_SIZE=24
+
+[Wayland]
+CompositorCommand=$COMPOSITOR
+EOF
+
+# --- 6. give the "default" cursor theme a real target ------------------------
+# The greeter's Qt client and weston both fall back to the freedesktop cursor
+# theme literally named "default" -- the greeter because SDDM's Wayland mode does
+# not propagate a cursor theme, weston because none is set in its config. Ryoku
+# ships no /usr/share/icons/default, so that fallback resolves to nothing and the
+# login screen has no pointer at all at boot and after logout. Point "default" at
+# the shipped Bibata set (ryoku-cursors). Only when the box has no default of its
+# own; a user or another package that owns one is left untouched. Mirror this in
+# reconcileGreeterCursor() (ryoku/cli/internal/doctor/doctor.go), which converges
+# existing boxes.
+DEFAULT_CURSOR_DIR="/usr/share/icons/default"
+if [[ -e $DEFAULT_CURSOR_DIR/index.theme || -d $DEFAULT_CURSOR_DIR/cursors ]]; then
+  echo "  default cursor theme already established; leaving it"
+else
+  echo "  default cursor theme -> Inherits=Bibata-Modern-Ice"
+  priv mkdir -p "$DEFAULT_CURSOR_DIR"
+  write_root "$DEFAULT_CURSOR_DIR/index.theme" <<'EOF'
+[Icon Theme]
+Name=Default
+Comment=Ryoku default cursor
+Inherits=Bibata-Modern-Ice
+EOF
+fi
+
+echo "SDDM wiring complete."

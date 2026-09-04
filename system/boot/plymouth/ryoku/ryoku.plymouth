@@ -1,0 +1,11 @@
+[Plymouth Theme]
+Name=BandingIndiaFlovers
+Description=Banding India Flovers splash screen.
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/banding-india-flovers
+ScriptFile=/usr/share/plymouth/themes/banding-india-flovers/banding-india-flovers.script
+ConsoleLogBackgroundColor=0x000000
+MonospaceFont=Cantarell 11
+Font=Cantarell 11

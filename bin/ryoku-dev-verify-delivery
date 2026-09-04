@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# verify that what a dev box runs actually reaches an installed box.
+#
+# two ways a change silently fails to reach users:
+#   1. a per-app config lands in the repo but no package/installer/deploy path
+#      ships it, so `ryoku update` (materialize) never lays it. this catches it.
+#   2. work sits on unstable-dev while main (the [ryoku] repo publishes from it)
+#      lags, so users are behind until main fast-forwards. this reports the gap.
+#
+#   ryoku-dev-verify-delivery            run every check (exit 1 on a hard gap)
+#   ryoku-dev-verify-delivery --quiet    same, only print problems
+#
+# see docs/updates.md for the delivery contract this enforces.
+set -euo pipefail
+
+quiet=0
+[[ ${1:-} == --quiet ]] && quiet=1
+say() { (( quiet )) || printf '%s\n' "$*"; }
+
+repo="$(git rev-parse --show-toplevel)"
+cd "$repo"
+
+# delivery paths: the package base config, the installer's one-time seeds, and
+# the dev deploy. an app config is "delivered" if any of them references it.
+sources=(release/packages/*/PKGBUILD installation/backend/lib/deploy.sh ryoku/shell/deploy.sh)
+
+# delivered = the file, or any ancestor dir up to apps/, is named by a delivery
+# path. a wholesale `cp -a apps/foo/.` ships every file under foo, so a match on
+# any ancestor counts. the "apps/..." suffix matches both the package paths
+delivered() {
+	local p="apps/${1#*/apps/}"
+	while :; do
+		grep -Fq -e "$p" "${sources[@]}" && return 0
+		[[ $p == apps/*/* ]] || break
+		p="$(dirname "$p")"
+	done
+	return 1
+}
+
+fail=0
+
+# 1. config orphans. every dotfile under ryoku/apps that ends up in a user's
+# home must be laid by a delivery path. skip a GUI app's quickshell tree, bin
+# helpers, .desktop handlers, docs, Go build sources/artifacts, and a Go
+# backend's testdata fixtures (test-only, never shipped): those ship by their
+# own package rules, not as materialized config.
+while IFS= read -r f; do
+	delivered "$f" || {
+		echo "delivery: ${f#"$repo"/} is in the repo but no package/installer/deploy ships it (users never get it)" >&2
+		fail=1
+	}
+done < <(find ryoku/apps -type f \
+	-not -path '*/quickshell/*' -not -path '*/bin/*' -not -path '*/backend/testdata/*' \
+	-not -name '*.desktop' -not -name '*.md' -not -name 'README*' \
+	-not -name '*.go' -not -name 'go.mod' -not -name 'go.sum' \
+	-not -name '*.cpp' -not -name '*.h' -not -name '*.qml' -not -name 'CMakeLists.txt' ! -executable)
+
+(( fail )) || say "delivery: every ryoku/apps config is shipped by a package, installer, or deploy path"
+
+# 2. publish lag. the [ryoku] repo publishes on push to main; unstable-dev work
+# only reaches users once main fast-forwards. report the gap so it is never
+# silent. best-effort: no network / no refs = skip, never a hard failure.
+if git rev-parse --verify -q origin/main >/dev/null && git rev-parse --verify -q origin/unstable-dev >/dev/null; then
+	behind="$(git rev-list --count origin/main..origin/unstable-dev 2>/dev/null || echo 0)"
+	if [[ ${behind:-0} -gt 0 ]]; then
+		say "delivery: origin/main is $behind commit(s) behind origin/unstable-dev; users get them only after main fast-forwards and publish-repo runs"
+	else
+		say "delivery: origin/main is level with origin/unstable-dev"
+	fi
+fi
+
+exit "$fail"

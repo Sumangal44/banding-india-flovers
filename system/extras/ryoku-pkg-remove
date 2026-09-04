@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+# -Rs: drop the package plus deps nothing else needs. pacman won't remove a
+# package another installed one still requires, so uninstalling an extras
+# bundle won't break the rest of the system.
+
+set -euo pipefail
+
+(($#)) || {
+  echo "ryoku-pkg-remove: no packages given" >&2
+  exit 2
+}
+
+exec sudo pacman -Rs --noconfirm "$@"

@@ -1,0 +1,36 @@
+# Build artifacts
+build/
+*.img
+*.iso
+*.efi
+*.bin
+*.o
+*.so
+*.a
+
+# Go
+ryoku-shell-installer/vendor/
+ryoku-shell-installer/ryoku-shell-installer
+
+# Rust
+ryoku/rashin/target/
+
+# Editor/IDE
+.vscode/
+*.swp
+*.swo
+*~
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+qemu-debug.log
+
+# Temp files
+*.tmp
+*.bak

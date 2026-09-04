@@ -1,0 +1,18 @@
+# 90-ryoku-gpu.rules
+#
+# managed by Ryoku (system/hardware/gpu). per PCI GPU, drop a boot-stable,
+# colon-free /dev/dri/ryoku-gpu-<pci-slot> symlink so Hyprland's AQ_DRM_DEVICES
+# can pin the strongest GPU as primary.
+#
+# why: AQ_DRM_DEVICES uses ':' as its separator, so the colon-laden
+# /dev/dri/by-path names are out, and bare /dev/dri/cardN renumbers across
+# boots. key the symlink on the PCI slot and swap its ':' and '.' for '-':
+#
+#   0000:01:00.0  ->  /dev/dri/ryoku-gpu-0000-01-00-0
+#
+# token build: %p = the device devpath
+# (/devices/.../0000:01:00.0/drm/card1). first sed drops the /drm/cardN tail,
+# second sed keeps the trailing path component (the PCI slot), tr maps ':' and
+# '.' to '-'. %c = that program's output. KERNELS limits the rule to GPUs whose
+# parent is a PCI device, so the slot is always there.
+SUBSYSTEM=="drm", KERNEL=="card[0-9]*", KERNELS=="????:??:??.?", PROGRAM="/bin/sh -c 'echo %p | sed s#/drm/.*## | sed s#.*/## | tr :. -'", SYMLINK+="dri/ryoku-gpu-%c"

@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+# Official-repo install via pacman. The extras actuator sends repo packages
+# here and AUR ones to ryoku-pkg-aur-add, so a bundle author just writes a
+# package name. Needs a TTY for the sudo prompt, which is why the Hub runs
+# installs in a floating terminal.
+
+set -euo pipefail
+
+(($#)) || {
+  echo "ryoku-pkg-add: no packages given" >&2
+  exit 2
+}
+
+# -Syu, not -S: installing new packages against a stale db is a partial upgrade,
+# which breaks on soname bumps (e.g. a new x265 vs the installed ffmpeg). A full
+# sync+upgrade keeps the transaction consistent.
+exec sudo pacman -Syu --needed --noconfirm "$@"

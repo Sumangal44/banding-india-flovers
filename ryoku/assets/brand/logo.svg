@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Banding India Flovers logo: lotus flower emblem on dark background -->
+  <rect width="512" height="512" rx="48" ry="48" fill="#171717"/>
+  <!-- Lotus petals -->
+  <g transform="translate(256,240)">
+    <!-- Center petal -->
+    <ellipse cx="0" cy="-60" rx="25" ry="70" fill="#FF69B4" opacity="0.9"/>
+    <!-- Left petals -->
+    <ellipse cx="-35" cy="-45" rx="22" ry="60" fill="#FF85C8" opacity="0.8" transform="rotate(-25)"/>
+    <ellipse cx="-60" cy="-20" rx="20" ry="50" fill="#FFB3D9" opacity="0.7" transform="rotate(-50)"/>
+    <!-- Right petals -->
+    <ellipse cx="35" cy="-45" rx="22" ry="60" fill="#FF85C8" opacity="0.8" transform="rotate(25)"/>
+    <ellipse cx="60" cy="-20" rx="20" ry="50" fill="#FFB3D9" opacity="0.7" transform="rotate(50)"/>
+    <!-- Base -->
+    <ellipse cx="0" cy="20" rx="50" ry="15" fill="#228B22" opacity="0.8"/>
+  </g>
+  <!-- Text -->
+  <text x="256" y="370" font-family="sans-serif" font-weight="700" font-size="28"
+        fill="#FF69B4" text-anchor="middle">BANDING INDIA FLOVERS</text>
+  <text x="256" y="400" font-family="sans-serif" font-weight="400" font-size="16"
+        fill="#EAE2D5" text-anchor="middle">v1.0.0</text>
+</svg>
