@@ -15,8 +15,9 @@
 # ryomotion, the source is a pinned git commit: bump _commit (and pkgrel, or
 # pkgver when src-tauri/tauri.conf.json's version moves) to ship a new build.
 pkgname=ryotunes
-pkgver=2.4.1
+pkgver=2.5.1
 pkgrel=1
+install=ryotunes.install
 pkgdesc="Ryotunes: the Ryoku music app (YouTube Music client with native playback)"
 arch=('x86_64')
 url="https://github.com/neur0map/ryotunes"
@@ -37,23 +38,22 @@ conflicts=("${_legacy[@]}")
 replaces=("${_legacy[@]}")
 # Rust already strips with the release profile; the debug split has nothing.
 options=('!lto' '!debug')
-_commit=7f9feedfa406516a4b4c712448af124592557f9c
-source=("$pkgname::git+https://github.com/neur0map/ryotunes.git#commit=$_commit")
-sha256sums=('SKIP')
+source=("ryotunes-$pkgver.tar.gz::https://github.com/neur0map/ryotunes/releases/download/v$pkgver/ryotunes-$pkgver.tar.gz")
+sha256sums=('6348be9c853050dd532ecc4ba4f0cd1ff8c5b466c409e31239844ad924faf411')
 
 build() {
-  cd "$srcdir/$pkgname/ui"
+  cd "$srcdir/$pkgname-$pkgver/ui"
   export npm_config_cache="$srcdir/.npm-cache"
   pnpm install --frozen-lockfile
   pnpm build
 
-  cd "$srcdir/$pkgname"
+  cd "$srcdir/$pkgname-$pkgver"
   export CARGO_HOME="$srcdir/.cargo"
   cargo build --release --locked --package ryotunes
 }
 
 package() {
-  cd "$srcdir/$pkgname"
+  cd "$srcdir/$pkgname-$pkgver"
   install -Dm755 target/release/ryotunes "$pkgdir/usr/bin/ryotunes"
   install -Dm644 packaging/linux/dev.ryoku.ryotunes.metainfo.xml \
     "$pkgdir/usr/share/metainfo/dev.ryoku.ryotunes.metainfo.xml"
