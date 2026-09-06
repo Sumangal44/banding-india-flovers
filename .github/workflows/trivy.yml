@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  actions: read # upload-sarif proxies the run's telemetry/fingerprint info from the workflow-run API
   security-events: write
 
 jobs:
