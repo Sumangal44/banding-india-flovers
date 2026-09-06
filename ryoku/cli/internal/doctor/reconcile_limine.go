@@ -30,15 +30,15 @@ import (
 const limineBranding = `timeout: 3
 default_entry: 1
 remember_last_entry: yes
-interface_branding: Ryoku Bootloader
-interface_branding_color: C75D2B
-interface_help_color: C75D2B
+interface_branding: Banding India Flovers Bootloader
+interface_branding_color: FF69B4
+interface_help_color: FF69B4
 hash_mismatch_panic: no
 
 term_background: 060607
 backdrop: 060607
-term_palette: 060607;EAE2D5;C75D2B;3A3630;88A57D;C75D2B;8C857A;EAE2D5
-term_palette_bright: 141210;EAE2D5;C75D2B;3A3630;88A57D;C75D2B;8C857A;EAE2D5
+term_palette: 060607;EAE2D5;FF69B4;3A3630;88A57D;FF69B4;8C857A;EAE2D5
+term_palette_bright: 141210;EAE2D5;FF69B4;3A3630;88A57D;FF69B4;8C857A;EAE2D5
 term_foreground: EAE2D5
 term_foreground_bright: EAE2D5
 term_background_bright: 141210

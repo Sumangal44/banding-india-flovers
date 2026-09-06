@@ -887,7 +887,7 @@ func TestMergeLimineConf(t *testing.T) {
 	shadow := `# Ryoku limine config = global look + branding only.
 timeout: 3
 default_entry: 1
-interface_branding: Ryoku Bootloader
+interface_branding: Banding India Flovers Bootloader
 term_background: 171717
 
 /Ryoku Linux
@@ -918,7 +918,7 @@ remember_last_entry: yes
 
 	t.Run("tool tree as base keeps entries and snapshots", func(t *testing.T) {
 		got := mergeLimineConf(tree, shadow)
-		for _, want := range []string{"/+Ryoku", "//+Snapshots", "interface_branding: Ryoku Bootloader", "remember_last_entry: yes", "default_entry: Ryoku/linux"} {
+		for _, want := range []string{"/+Ryoku", "//+Snapshots", "interface_branding: Banding India Flovers Bootloader", "remember_last_entry: yes", "default_entry: Ryoku/linux"} {
 			if !strings.Contains(got, want) {
 				t.Errorf("merged config missing %q:\n%s", want, got)
 			}
@@ -1848,7 +1848,7 @@ func TestReconcilePortalRoutingHealsUserHijack(t *testing.T) {
 // entry" cannot autoboot, so the timeout countdown restarts forever.
 const limineAdoptedDirty = `timeout: 3
 default_entry: 2
-interface_branding: Ryoku Bootloader
+interface_branding: Banding India Flovers Bootloader
 
 /Ryoku Linux
     protocol: linux
@@ -1935,7 +1935,7 @@ func TestMergeLimineConfHealsAdoptedRoot(t *testing.T) {
 	for _, want := range []string{
 		"default_entry: Ryoku Linux/linux", // entry path into the boot directory autoboots the kernel
 		"  //linux",
-		"interface_branding: Ryoku Bootloader",
+		"interface_branding: Banding India Flovers Bootloader",
 		"/EFI fallback",
 	} {
 		if !strings.Contains(merged, want) {
@@ -1950,7 +1950,7 @@ func TestMergeLimineConfHealsAdoptedRoot(t *testing.T) {
 func TestLimineEnsureAutoboot(t *testing.T) {
 	const conf = `timeout: 3
 default_entry: 2
-interface_branding: Ryoku Bootloader
+interface_branding: Banding India Flovers Bootloader
 
 /Ryoku Linux
   //linux

@@ -68,7 +68,7 @@ conf="$tmp/limine.conf"
 cat >"$conf" <<'EOF'
 timeout: 3
 default_entry: 1
-interface_branding: Ryoku Bootloader
+interface_branding: Banding India Flovers Bootloader
 
 /Ryoku Linux
     protocol: linux
@@ -97,7 +97,7 @@ grep -qxF 'default_entry: Ryoku/linux' "$conf" || fail "promote must repoint def
 grep -qxF 'remember_last_entry: yes' "$conf" || fail "promote must enable remember_last_entry so the last kernel autoboots"
 grep -qxF '/+Ryoku' "$conf" || fail "promote clobbered the tool's boot tree"
 grep -qxF '/Windows' "$conf" || fail "promote clobbered the Windows chainload entry"
-grep -qF 'interface_branding: Ryoku Bootloader' "$conf" || fail "promote clobbered the branding"
+grep -qF 'interface_branding: Banding India Flovers Bootloader' "$conf" || fail "promote clobbered the branding"
 
 # promote is idempotent: a second run changes nothing.
 cp "$conf" "$tmp/before.conf"

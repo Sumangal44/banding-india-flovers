@@ -214,7 +214,7 @@ grep -qiF 'interface_branding' <<<"$hop" && fail "stage-1 hop must stay a bare h
 # STAGE 2 /boot conf: branding + fslabel(RYOKUBOOT) kernels + guid() existing-OS
 # chainload. windows kind:
 win_conf="$(ryoku_alongside_conf_text windows /EFI/Microsoft/Boot/bootmgfw.efi 1111-2222)"
-grep -qF 'interface_branding: Ryoku Bootloader' <<<"$win_conf" || fail "stage-2 conf lost the branding globals"
+grep -qF 'interface_branding: Banding India Flovers Bootloader' <<<"$win_conf" || fail "stage-2 conf lost the branding globals"
 grep -qF 'kernel_path: fslabel(RYOKUBOOT):/vmlinuz-linux' <<<"$win_conf" || fail "stage-2 conf missing the fslabel(RYOKUBOOT) kernel path"
 grep -qF 'module_path: fslabel(RYOKUBOOT):/initramfs-linux.img' <<<"$win_conf" || fail "stage-2 conf missing the fslabel(RYOKUBOOT) initramfs path"
 grep -qxF '/Windows' <<<"$win_conf" || fail "stage-2 windows conf missing the /Windows entry"
