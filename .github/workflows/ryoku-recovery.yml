@@ -1,0 +1,36 @@
+name: Recovery restores main
+
+# The curl|bash panic button (bin/ryoku-recovery) must always restore a machine
+# to the stable main branch and repair the broken checkout in place, even when
+# RYOKU_CHANNEL is leaked to unstable-dev. An old ISO updater switched the
+# checkout to unstable-dev, where the rewritten tree lacks the old helper
+# commands, and bricked a user; recovery is the only way back, so it must not be
+# subvertible. See tests/ryoku-recovery.sh.
+
+on:
+  pull_request:
+    paths:
+      - 'bin/ryoku-recovery'
+      - 'tests/ryoku-recovery.sh'
+  push:
+    branches:
+      - main
+    paths:
+      - 'bin/ryoku-recovery'
+      - 'tests/ryoku-recovery.sh'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  recovery:
+    name: Recovery forces main and repairs in place
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Recovery restores a machine to main
+        shell: bash
+        run: bash tests/ryoku-recovery.sh

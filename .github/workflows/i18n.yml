@@ -1,0 +1,90 @@
+name: i18n
+
+# Keep the per-language translation files current without anyone editing them.
+# When a UI string changes (any .qml, or a hub schema label/desc/group), this
+# extracts the English source and translates ONLY the strings each language is
+# missing, then commits the result back. A developer writes English; the rest
+# is machine-filled here, and overrides/<lang>.json (human fixes) are preserved.
+#
+# It commits to the branch that was pushed, so translations flow to main through
+# the normal fast-forward, never triggering a publish on their own.
+
+on:
+  push:
+    branches:
+      - main
+      - unstable-dev
+    paths:
+      - '**/*.qml'
+      - 'ryoku/hub/quickshell/schema/*.js'
+      - 'ryoku/ui/i18n-sync.py'
+      - 'ryoku/ui/translations/overrides/**'
+      - '.github/workflows/i18n.yml'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Re-translate every string (upgrade existing), not just missing ones"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: i18n-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  translate:
+    name: Regenerate translations
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Extract English + translate missing strings
+        # Prefer the LLM engine (domain prompt + glossary: correct word senses,
+        # length kept in check) when a key is configured; otherwise fall back to
+        # the free, keyless Google endpoint so the job still works with no secret.
+        env:
+          RYOKU_I18N_PROVIDER: openai
+          RYOKU_I18N_URL: https://openrouter.ai/api/v1/chat/completions
+          RYOKU_I18N_MODEL: ${{ vars.RYOKU_I18N_MODEL || 'google/gemini-2.5-flash' }}
+          RYOKU_I18N_KEY: ${{ secrets.RYOKU_I18N_KEY }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          python3 ryoku/ui/i18n-sync.py extract
+          flag=""
+          [ "$FORCE" = "true" ] && flag="--force"
+          if [ -n "$RYOKU_I18N_KEY" ]; then
+            python3 ryoku/ui/i18n-sync.py sync --engine llm $flag
+          else
+            python3 ryoku/ui/i18n-sync.py sync $flag
+          fi
+          # advisory: surface translations that expand the UI (non-fatal).
+          python3 ryoku/ui/i18n-sync.py check || true
+
+      - name: Commit updated translations
+        run: |
+          if git diff --quiet -- ryoku/ui/translations; then
+            echo "Translations already current."
+            exit 0
+          fi
+          git config user.name "ryoku-i18n"
+          git config user.email "noreply@ryoku"
+          git add ryoku/ui/translations
+          git commit -m "[ryoku] i18n: regenerate translations"
+          # the version-bump job pushes to this same ref on every push, so our
+          # push can lose the race. rebase onto whatever landed and retry; the
+          # translations commit only touches ryoku/ui/translations, so it never
+          # conflicts with the bump.
+          for _ in 1 2 3; do
+            git push origin "HEAD:${GITHUB_REF_NAME}" && exit 0
+            git pull --rebase origin "${GITHUB_REF_NAME}"
+          done
+          git push origin "HEAD:${GITHUB_REF_NAME}"

@@ -1,0 +1,154 @@
+name: ShellCheck
+
+on:
+  pull_request:
+    paths:
+      - '**/*.sh'
+      - '**/*.bash'
+      - 'bin/**'
+      - 'installation/**'
+      - 'system/**'
+      - 'ryoku/**'
+      - 'tests/**'
+      - '.githooks/**'
+      - '.github/workflows/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '**/*.sh'
+      - '**/*.bash'
+      - 'bin/**'
+      - 'installation/**'
+      - 'system/**'
+      - 'ryoku/**'
+      - 'tests/**'
+      - '.githooks/**'
+      - '.github/workflows/**'
+  workflow_dispatch:
+    inputs:
+      scope:
+        description: Files to lint
+        required: true
+        default: changed
+        type: choice
+        options:
+          - changed
+          - all
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    name: ShellCheck changed shell files
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Bounded, retried, and not at the mercy of a mirror: this step sat on a
+      # stalled Azure apt mirror for over an hour on a job that finishes in a
+      # minute, then went red when the bound cut it off. The upstream release
+      # tarball is a static binary, so it stands in when apt cannot serve.
+      - name: Install ShellCheck
+        shell: bash
+        timeout-minutes: 10
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          set -euo pipefail
+          if sudo apt-get update -o Acquire::Retries=3 \
+            && sudo apt-get install -y -o Acquire::Retries=3 shellcheck; then
+            shellcheck --version
+            exit 0
+          fi
+          echo "::warning::apt could not serve shellcheck; falling back to the upstream release"
+          ver=v0.10.0
+          url="https://github.com/koalaman/shellcheck/releases/download/${ver}/shellcheck-${ver}.linux.x86_64.tar.xz"
+          curl -fsSL --retry 3 --max-time 120 "$url" \
+            | sudo tar -xJ --strip-components=1 -C /usr/local/bin "shellcheck-${ver}/shellcheck"
+          shellcheck --version
+
+      - name: Collect files
+        id: files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          files="$(mktemp)"
+          scope="${{ github.event.inputs.scope || 'changed' }}"
+
+          collect_from_git_stream() {
+            while IFS= read -r -d '' file; do
+              [[ -f $file ]] || continue
+              [[ $file == ryoku/lockscreen/qylock/* ]] && continue
+              [[ $file == */vendor/* ]] && continue
+
+              # skip non-shell interpreters that share these dirs (e.g.
+              # python under bin/). shellcheck would parse them as bash
+              # and emit bogus errors.
+              if head -n 1 -- "$file" 2>/dev/null \
+                | grep -Eq '^#!.*(python|perl|node|ruby|/env[[:space:]]+(python|perl|node|ruby))'; then
+                continue
+              fi
+
+              case "$file" in
+                *.sh|*.bash)
+                  printf '%s\0' "$file" >>"$files"
+                  ;;
+                *)
+                  if head -n 1 -- "$file" 2>/dev/null | grep -Eq '^#!.*(bash|dash|/sh|[[:space:]]sh)([[:space:]]|$)'; then
+                    printf '%s\0' "$file" >>"$files"
+                  fi
+                  ;;
+              esac
+            done
+          }
+
+          if [[ $scope == "all" ]]; then
+            git ls-files -z | collect_from_git_stream
+          elif [[ $GITHUB_EVENT_NAME == "pull_request" ]]; then
+            git diff --name-only --diff-filter=ACM -z \
+              "${{ github.event.pull_request.base.sha }}" \
+              "${{ github.event.pull_request.head.sha }}" \
+              | collect_from_git_stream
+          elif [[ $GITHUB_EVENT_NAME == "push" ]]; then
+            before="${{ github.event.before }}"
+            # force-push (main sync) orphans before-sha; fall back to HEAD~1
+            if [[ -n $before ]] && ! git cat-file -e "$before^{commit}" 2>/dev/null; then
+              before="$(git rev-parse HEAD~1 2>/dev/null || true)"
+            fi
+
+            if [[ -z $before || $before == "0000000000000000000000000000000000000000" ]]; then
+              git ls-files -z | collect_from_git_stream
+            else
+              git diff --name-only --diff-filter=ACM -z \
+                "$before" \
+                "${{ github.sha }}" \
+                | collect_from_git_stream
+            fi
+          else
+            git diff --name-only --diff-filter=ACM -z HEAD~1 HEAD | collect_from_git_stream
+          fi
+
+          if [[ ! -s $files ]]; then
+            echo "has_files=false" >>"$GITHUB_OUTPUT"
+            echo "No shell files to lint."
+            exit 0
+          fi
+
+          sort -zu "$files" > shellcheck-files.txt
+          echo "has_files=true" >>"$GITHUB_OUTPUT"
+          echo "Files selected for ShellCheck:"
+          tr '\0' '\n' < shellcheck-files.txt
+
+      - name: Run ShellCheck
+        if: steps.files.outputs.has_files == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          xargs -0 shellcheck -x -s bash --severity=warning < shellcheck-files.txt
