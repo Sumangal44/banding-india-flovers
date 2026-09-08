@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Changed
+- **`ryotunes` 1.0.1-1 tracks neur0map/ryotunes v1.0.1.**
 - **`ryotunes` 2.5.1-1 tracks neur0map/ryotunes v2.5.1.** The heart saves without an account. Liking a track when there is no YouTube Music session (or on a SoundCloud/local track) lands it in a device-local Liked...
 - **A release dispatches both ISOs.** The publish ran only `build-iso.yml`
   (plain Arch) after a release; `build-iso-cachyos.yml` is dispatched from the
